@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from mcp_firewall.audit import AuditLog
+from mcp_firewall.detectors import DENY_CATEGORIES, DetectorEngine, DetectorStore
 from mcp_firewall.labels import LabelStore
 from mcp_firewall.policy import Policy
 from mcp_firewall.proxy import Proxy
@@ -23,7 +24,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
     audit = AuditLog(args.audit_db)
     label_store = LabelStore(args.audit_db)
+    detector_store = DetectorStore(args.audit_db)
     policy = Policy.load(args.policy) if args.policy else None
+    detector_engine = DetectorEngine(
+        detector_store,
+        deny_rules=(set(policy.rules) & DENY_CATEGORIES) if policy else set(),
+        warn_threshold=policy.tool_poisoning_warn_threshold if policy else 0.5,
+    )
     proxy = Proxy(
         server_name=args.server,
         command=command,
@@ -31,6 +38,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         trust_level=args.trust_level,
         policy=policy,
         label_store=label_store,
+        detector_engine=detector_engine,
         repo_root=REPO_ROOT,
     )
     try:
@@ -38,6 +46,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     finally:
         audit.close()
         label_store.close()
+        detector_store.close()
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -50,6 +59,9 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
+    if args.findings:
+        return _print_findings(args.audit_db)
+
     audit = AuditLog(args.audit_db)
     rows = audit.all_rows()
     audit.close()
@@ -61,6 +73,20 @@ def _cmd_report(args: argparse.Namespace) -> int:
         verdict = row["verdict"] or ""
         reason = row["reason"] or ""
         print(f"{row['ts']}  {row['server_name']:<14} {row['direction']:<9} {summary:<20} {verdict:<12} {reason}")
+    return 0
+
+
+def _print_findings(audit_db: str) -> int:
+    detector_store = DetectorStore(audit_db)
+    findings = detector_store.all_findings()
+    detector_store.close()
+    if not findings:
+        print("(no findings)")
+        return 0
+    for f in findings:
+        tag = "ENFORCED" if f["enforced"] else "logged"
+        score = f" score={f['score']:.2f}" if f["score"] is not None else ""
+        print(f"{f['ts']}  [{f['severity'].upper():<4}/{tag:<8}] {f['category']:<15} {f['server_name']}.{f['tool_name']}{score}  {f['message']}")
     return 0
 
 
@@ -84,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_report = sub.add_parser("report", help="print the audit log")
     p_report.add_argument("--audit-db", default="audit.db")
+    p_report.add_argument("--findings", action="store_true", help="print detector findings instead of the call log")
     p_report.set_defaults(func=_cmd_report)
 
     return parser

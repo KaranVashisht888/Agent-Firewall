@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mcp_firewall._dbutil import connect_with_schema
+
 from mcp_firewall.labels.matching import best_containment, normalize
 
 DEFAULT_SECRET_PATTERNS = [
@@ -87,11 +89,7 @@ class LabelStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        self._conn = connect_with_schema(self.path, SCHEMA)
 
     def add_span(
         self,

@@ -10,11 +10,20 @@ sinks:
   - server: mailer_server
     tools: [send_message]
 
-# rules: which deny checks are active. Both are independent -- either alone
-# is enough to deny a call.
+# rules: which deny checks are active. Each is independent -- any one alone
+# is enough to deny a call. rug_pull, tool_shadowing, and invisible_chars
+# are deterministic, near-zero-false-positive detector checks (see
+# mcp_firewall/detectors.py) and are enabled by default; tool_poisoning
+# (imperative-instruction heuristic) deliberately has NO deny rule -- it is
+# warn-only, tuned via detectors.warn_threshold below, because ordinary
+# tool descriptions are often imperative too and blocking on it would
+# over-block.
 rules:
   - deny: secret_to_sink        # nothing labelled is_secret may reach a sink
   - deny: untrusted_to_sink_arg # untrusted-derived data may not reach a sink
+  - deny: rug_pull              # a tool's schema changed since it was first pinned
+  - deny: tool_shadowing        # two servers registered the same tool name
+  - deny: invisible_chars       # invisible/bidi/control chars in a tool description
   - allow_paths: ["demo/sandbox/**"]
 
 # taint matching: how strictly a sink argument must resemble a previously
@@ -28,3 +37,9 @@ matching:
 # used to flag a tool result as is_secret.
 secret_patterns:
   - "CANARY-[A-Z0-9-]+"
+
+# static detector tuning. warn_threshold gates what surfaces in
+# `mcp-firewall report --findings` for the warn-only tool_poisoning score
+# (0-1, see mcp_firewall/detectors.py) -- it can never deny a call.
+detectors:
+  warn_threshold: 0.5

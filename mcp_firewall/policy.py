@@ -49,6 +49,9 @@ class Policy:
 
         self.secret_patterns: list[str] = list(config.get("secret_patterns") or [])
 
+        detectors_cfg = config.get("detectors", {}) or {}
+        self.tool_poisoning_warn_threshold = float(detectors_cfg.get("warn_threshold", 0.5))
+
     @classmethod
     def load(cls, path: str | Path) -> "Policy":
         with open(path, "r", encoding="utf-8") as f:

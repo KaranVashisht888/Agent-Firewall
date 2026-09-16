@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CANARY = "CANARY-DO-NOT-PANIC-0001"
 
 
-def _run_attack_scenario(tmp_path: Path, *, with_policy: bool) -> tuple[int, str, Path]:
+def _run_attack_scenario(tmp_path: Path, *, with_policy: bool) -> tuple[int, str, str, Path]:
     audit_db = tmp_path / "audit.db"
     outbox = REPO_ROOT / "demo" / "mailer_outbox.log"
     if outbox.is_file():
@@ -39,25 +39,25 @@ def _run_attack_scenario(tmp_path: Path, *, with_policy: bool) -> tuple[int, str
         cmd += ["--policy", str(REPO_ROOT / "policy.yaml")]
 
     result = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30)
-    return result.returncode, result.stdout, audit_db
+    return result.returncode, result.stdout, result.stderr, audit_db
 
 
 def test_attack_scenario_firewall_off_leaks_the_canary(tmp_path):
-    returncode, stdout, _ = _run_attack_scenario(tmp_path, with_policy=False)
+    returncode, stdout, stderr, _ = _run_attack_scenario(tmp_path, with_policy=False)
     outbox = REPO_ROOT / "demo" / "mailer_outbox.log"
 
+    assert "LEAKED" in stdout, f"stdout={stdout!r} stderr={stderr!r}"
     assert returncode == 1  # agent.py signals "leaked" with a nonzero exit
-    assert "LEAKED" in stdout
     assert outbox.is_file()
     assert CANARY in outbox.read_text(encoding="utf-8")
 
 
 def test_attack_scenario_firewall_on_blocks_the_canary(tmp_path):
-    returncode, stdout, audit_db = _run_attack_scenario(tmp_path, with_policy=True)
+    returncode, stdout, stderr, audit_db = _run_attack_scenario(tmp_path, with_policy=True)
     outbox = REPO_ROOT / "demo" / "mailer_outbox.log"
 
+    assert "BLOCKED" in stdout, f"stdout={stdout!r} stderr={stderr!r}"
     assert returncode == 0
-    assert "BLOCKED" in stdout
     # The canary must never appear in the sink's log at all when the
     # firewall is on -- not just "not appended this run".
     if outbox.is_file():

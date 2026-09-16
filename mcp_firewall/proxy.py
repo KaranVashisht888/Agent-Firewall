@@ -17,6 +17,14 @@ Within `tools/call`, two things happen beyond Phase 1's plain logging:
   secret-or-not) and persisted to the shared LabelStore, so a later call --
   possibly to a completely different server, hence a different proxy
   process -- can be checked against everything this session has seen so far.
+
+Within `tools/list` and `tools/call`, static detector checks also run (see
+detectors.py): a tool flagged for a deny-capable category (rug pull, cross-
+server name shadowing, invisible characters) is filtered out of the
+`tools/list` result before it's forwarded -- the one deliberate exception
+to always-verbatim forwarding, scoped to just the `result.tools` array --
+and any `tools/call` to a flagged tool is refused the same way a policy
+DENY is.
 """
 from __future__ import annotations
 
@@ -28,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp_firewall.audit import AuditLog
+from mcp_firewall.detectors import DetectorEngine
 from mcp_firewall.labels import Label, LabelStore, detect_secret
 from mcp_firewall.policy import Policy, Verdict
 
@@ -48,6 +57,7 @@ class Proxy:
         trust_level: str = "untrusted",
         policy: Policy | None = None,
         label_store: LabelStore | None = None,
+        detector_engine: DetectorEngine | None = None,
         repo_root: Path | None = None,
         stderr_to_devnull: bool = True,
     ) -> None:
@@ -57,6 +67,7 @@ class Proxy:
         self.trust_level = trust_level
         self.policy = policy
         self.label_store = label_store
+        self.detector_engine = detector_engine
         self.repo_root = repo_root or Path.cwd()
         self._stderr_to_devnull = stderr_to_devnull
         self._pending: dict[str, dict[str, Any]] = {}
@@ -133,7 +144,12 @@ class Proxy:
         arguments = params.get("arguments") or {}
 
         verdict = Verdict(True)
-        if self.policy is not None and self.label_store is not None:
+        if self.detector_engine is not None:
+            blocked = self.detector_engine.check_blocked(self.server_name, tool_name)
+            if blocked is not None:
+                verdict = Verdict(False, blocked.message)
+
+        if verdict.allow and self.policy is not None and self.label_store is not None:
             verdict = self.policy.evaluate(
                 server=self.server_name,
                 tool=tool_name,
@@ -193,19 +209,22 @@ class Proxy:
 
     def _handle_incoming(self, raw_line: bytes, dst) -> None:
         msg = self._parse(raw_line)
+        line_to_send = raw_line
         if msg is not None:
-            self._observe_incoming(msg)
+            override = self._observe_incoming(msg)
+            if override is not None:
+                line_to_send = override
         with self._stdout_lock:
-            self._write(dst, raw_line)
+            self._write(dst, line_to_send)
 
-    def _observe_incoming(self, msg: dict) -> None:
+    def _observe_incoming(self, msg: dict) -> bytes | None:
         request_id = msg.get("id")
         if request_id is None:
-            return
+            return None
         with self._pending_lock:
             pending = self._pending.pop(_id_key(request_id), None)
         if pending is None:
-            return
+            return None
 
         is_error = "error" in msg
         result = msg.get("error") if is_error else msg.get("result")
@@ -220,6 +239,27 @@ class Proxy:
 
         if pending["method"] == "tools/call" and not is_error and self.label_store is not None:
             self._label_result(pending.get("tool_name"), request_id, result)
+            return None
+
+        if pending["method"] == "tools/list" and not is_error and self.detector_engine is not None:
+            return self._filter_tools_list(msg, result)
+
+        return None
+
+    def _filter_tools_list(self, msg: dict, result: Any) -> bytes | None:
+        if not isinstance(result, dict):
+            return None
+        tools = result.get("tools")
+        if not isinstance(tools, list):
+            return None
+
+        filtered_tools, _findings = self.detector_engine.process_tools_list(self.server_name, tools)
+        if len(filtered_tools) == len(tools):
+            return None  # nothing flagged; forward the original bytes unchanged
+
+        new_msg = dict(msg)
+        new_msg["result"] = {**result, "tools": filtered_tools}
+        return (json.dumps(new_msg) + "\n").encode("utf-8")
 
     def _label_result(self, tool_name: str | None, request_id: Any, result: Any) -> None:
         if not isinstance(result, dict):
