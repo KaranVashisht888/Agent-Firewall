@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from mcp_firewall.audit import AuditLog
+from mcp_firewall.labels import LabelStore
+from mcp_firewall.policy import Policy
 from mcp_firewall.proxy import Proxy
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -20,21 +22,30 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("error: no downstream command given (use: mcp-firewall run --server NAME -- <command> ...)", file=sys.stderr)
         return 2
     audit = AuditLog(args.audit_db)
+    label_store = LabelStore(args.audit_db)
+    policy = Policy.load(args.policy) if args.policy else None
     proxy = Proxy(
         server_name=args.server,
         command=command,
         audit=audit,
         trust_level=args.trust_level,
+        policy=policy,
+        label_store=label_store,
+        repo_root=REPO_ROOT,
     )
     try:
         return proxy.run()
     finally:
         audit.close()
+        label_store.close()
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
     demo_agent = REPO_ROOT / "demo" / "agent.py"
-    result = subprocess.run([sys.executable, str(demo_agent), "--audit-db", args.audit_db])
+    cmd = [sys.executable, str(demo_agent), "--audit-db", args.audit_db, "--scenario", args.scenario]
+    if args.policy:
+        cmd += ["--policy", args.policy]
+    result = subprocess.run(cmd)
     return result.returncode
 
 
@@ -61,11 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--server", required=True, help="logical name of the downstream server")
     p_run.add_argument("--trust-level", default="untrusted", choices=["trusted", "untrusted"])
     p_run.add_argument("--audit-db", default="audit.db")
+    p_run.add_argument("--policy", default=None, help="path to policy.yaml; omit to run in pass-through-only mode (no DENY)")
     p_run.add_argument("command", nargs=argparse.REMAINDER, help="-- <command> <args...> for the real server")
     p_run.set_defaults(func=_cmd_run)
 
     p_demo = sub.add_parser("demo", help="run the local end-to-end demo against the mock servers")
     p_demo.add_argument("--audit-db", default="audit.db")
+    p_demo.add_argument("--policy", default=None, help="path to policy.yaml; omit for firewall-off pass-through")
+    p_demo.add_argument("--scenario", default="benign", choices=["benign", "attack"])
     p_demo.set_defaults(func=_cmd_demo)
 
     p_report = sub.add_parser("report", help="print the audit log")

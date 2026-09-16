@@ -11,11 +11,13 @@ from typing import Any
 
 
 class MCPClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, error: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error = error or {}
 
 
 class StdioMCPClient:
-    def __init__(self, command: list[str], *, cwd: str | None = None) -> None:
+    def __init__(self, command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> None:
         self._proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -23,6 +25,7 @@ class StdioMCPClient:
             stderr=None,
             bufsize=0,
             cwd=cwd,
+            env=env,
         )
         self._next_id = 1
         self._lock = threading.Lock()
@@ -48,7 +51,7 @@ class StdioMCPClient:
         if response.get("id") != msg_id:
             raise MCPClientError(f"response id mismatch: expected {msg_id}, got {response.get('id')}")
         if "error" in response:
-            raise MCPClientError(f"{method} failed: {response['error']}")
+            raise MCPClientError(f"{method} failed: {response['error']}", error=response["error"])
         return response.get("result")
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:

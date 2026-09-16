@@ -18,7 +18,9 @@ server = MiniMCPServer("docs_server")
 
 
 def _resolve_in_sandbox(rel_path: str) -> Path:
-    candidate = (SANDBOX / rel_path).resolve()
+    # Paths are repo-root-relative (e.g. "demo/sandbox/notes.txt"), matching
+    # the convention policy.yaml's allow_paths globs are written against.
+    candidate = (REPO_ROOT / rel_path).resolve()
     if candidate != SANDBOX and SANDBOX not in candidate.parents:
         raise ValueError(f"path escapes sandbox, refusing: {rel_path}")
     return candidate
@@ -29,7 +31,7 @@ def _resolve_in_sandbox(rel_path: str) -> Path:
     "Read a text document from the sandboxed docs store.",
     {
         "type": "object",
-        "properties": {"path": {"type": "string", "description": "path relative to the sandbox root"}},
+        "properties": {"path": {"type": "string", "description": "path relative to the repo root, e.g. demo/sandbox/notes.txt"}},
         "required": ["path"],
     },
 )

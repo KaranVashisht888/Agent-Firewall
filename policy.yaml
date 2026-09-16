@@ -1,0 +1,25 @@
+# mcp-firewall default policy.
+#
+# sinks: tool calls where tainted data must never be allowed to arrive.
+sinks:
+  - server: mailer_server
+    tools: [send_message]
+
+# rules: which deny checks are active. Both are independent -- either alone
+# is enough to deny a call.
+rules:
+  - deny: secret_to_sink        # nothing labelled is_secret may reach a sink
+  - deny: untrusted_to_sink_arg # untrusted-derived data may not reach a sink
+  - allow_paths: ["demo/sandbox/**"]
+
+# taint matching: how strictly a sink argument must resemble a previously
+# labelled value before it counts as "derived from" it. See
+# mcp_firewall/labels/matching.py for how the score is computed.
+matching:
+  threshold: 0.6
+  near_miss_floor: 0.15
+
+# extra regexes (unioned with the built-in defaults in mcp_firewall/labels/__init__.py)
+# used to flag a tool result as is_secret.
+secret_patterns:
+  - "CANARY-[A-Z0-9-]+"

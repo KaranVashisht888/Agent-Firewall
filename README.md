@@ -15,13 +15,13 @@ information-flow control, not an LLM judge.**
 
 ## Status
 
-Phase 1 of 5 is complete: a method-agnostic stdio proxy shim with an
-append-only audit log, wired end-to-end against three local mock MCP
-servers. Labelling, the policy engine, static detectors, the benchmark
-harness, and the dashboard land in later phases (tracked below).
+Phases 1–2 of 5 are complete: a method-agnostic stdio proxy shim with an
+append-only audit log, plus label propagation, taint matching, and a policy
+engine wired into a real DENY path. Static detectors, the benchmark harness,
+and the dashboard land in later phases (tracked below).
 
 - [x] Phase 1 — proxy shim, audit log, CLI
-- [ ] Phase 2 — labels, taint propagation, policy engine, DENY path
+- [x] Phase 2 — labels, taint matching, policy engine, DENY path
 - [ ] Phase 3 — static detectors (rug pull, shadowing, tool poisoning)
 - [ ] Phase 4 — benchmark harness and results
 - [ ] Phase 5 — read-only dashboard
@@ -60,30 +60,49 @@ MCP client (Claude Desktop, Cursor, etc.)
         |
         |  stdio, JSON-RPC 2.0
         v
-  mcp-firewall run  --server <name> -- <real server command>
+  mcp-firewall run  --server <name> --policy policy.yaml -- <real server command>
         |
         | inspects only tools/call and tools/list;
-        | every other method is forwarded verbatim, ids untouched
+        | every other method is forwarded verbatim, ids untouched.
+        | an outgoing tools/call aimed at a sink is checked against the
+        | policy BEFORE it is forwarded -- a denied call never reaches
+        | the real server at all.
         v
    real MCP server (spawned as a subprocess)
 ```
 
 Each configured downstream server gets its own `mcp-firewall run` process,
 mirroring how a real MCP host already spawns one process per server entry
-in its config. All instances share one local audit database.
+in its config. All instances share one local SQLite file holding both the
+audit log and the label store, which is how taint recorded by one process
+(e.g. `inbox_server`'s proxy) is visible when a different process (e.g.
+`mailer_server`'s proxy) evaluates a later call.
 
 ```
 mcp_firewall/
-  proxy.py      MCP protocol shim (stdio). Method-agnostic: parses only
-                tools/call and tools/list, forwards everything else
-                (including unknown/future methods, notifications, progress,
-                cancellation) byte-for-byte with ids preserved.
-  labels.py      [phase 2] Label model {source_server, trust_level, is_secret}
-                and propagation.
-  policy.py      [phase 2] Loads policy.yaml, evaluates rules, ALLOW/DENY.
+  proxy.py       MCP protocol shim (stdio). Method-agnostic: parses only
+                 tools/call and tools/list, forwards everything else
+                 (including unknown/future methods, notifications, progress,
+                 cancellation) byte-for-byte with ids preserved. Evaluates
+                 policy on outgoing tools/call before forwarding; labels
+                 incoming tools/call results.
+  labels/
+    __init__.py  Label model {source_server, trust_level, is_secret} and
+                 LabelStore, a SQLite-backed table of every text span the
+                 proxy has seen, shared across all `mcp-firewall run`
+                 processes pointed at the same audit db.
+    matching.py  Taint matching, independent of storage: normalises text
+                 (case/whitespace/Unicode), scores overlap with a
+                 containment score over character/word shingles (not exact
+                 substring -- an agent will paraphrase), and tries base64/
+                 hex/URL-decoded variants of the candidate text so an
+                 encoded derivation still matches.
+  policy.py      Loads policy.yaml (sinks, deny rules, allow_paths, matching
+                 threshold), evaluates ALLOW/DENY for a tools/call against
+                 whatever labels LabelStore.find_matches() turns up.
   detectors.py   [phase 3] Static checks on tool metadata.
   audit.py       SQLite append-only log of every tools/call and tools/list:
-                args, result, verdict, reason.
+                 args, result, verdict, reason.
   cli.py         `mcp-firewall run|demo|report`
 
 demo/
@@ -92,13 +111,18 @@ demo/
                   inbox_server  (UNTRUSTED, returns canned emails from fixtures)
                   mailer_server (the sink; appends to a local log file --
                                  there is no network code in this file at all)
-  agent.py       The scripted "client" that drives the demo. See the
+  agent.py       The scripted "client" that drives the demo, in both a
+                 benign mode and an attack-scenario mode. See the
                  worst-case-agent note below before reading any firewall-off
                  number produced by it.
   mcp_client.py  A small synchronous stdio JSON-RPC client used by agent.py.
-  fixtures/      Benign (and, later, attack-scenario) fixtures as plain text.
+  fixtures/      Benign and attack-scenario fixtures, as plain text.
   sandbox/       fake_secrets.txt (a fake canary, CANARY-DO-NOT-PANIC-0001)
                  and a couple of dummy documents.
+
+policy.yaml      Default policy: mailer_server.send_message is a sink;
+                 nothing labelled is_secret or untrusted may reach it;
+                 docs paths are restricted to demo/sandbox/**.
 
 tests/
   fixtures/echo_server.py   Trivial stdio JSON-RPC responder used only to
@@ -108,6 +132,32 @@ tests/
                              proxy also works against genuine SDK traffic,
                              not just our own hand-rolled mock protocol.
 ```
+
+### How taint propagation and the DENY path work
+
+1. When a proxy observes a **successful `tools/call` response**, it labels
+   every text block in the result with `{source_server, trust_level,
+   is_secret}` — trust level comes from how that server was configured
+   (`--trust-level`), and `is_secret` comes from a small set of regexes
+   (the demo canary's `CANARY-...` pattern plus a couple of generic
+   API-key-shaped patterns) checked against the text. The labelled span is
+   written to the shared `label_spans` table.
+2. When a proxy observes an **outgoing `tools/call` request** whose target
+   is declared a sink in `policy.yaml`, it takes each string argument and
+   asks the LabelStore whether it resembles anything previously labelled —
+   scored via `mcp_firewall/labels/matching.py`'s containment score, with a
+   configurable threshold (default `0.6`). The score is computed against
+   the plain argument text and against base64/hex/URL-decoded variants of
+   it, so a value smuggled through a simple reversible encoding is still
+   caught.
+3. If a match is found and it violates an active rule
+   (`secret_to_sink`, `untrusted_to_sink_arg`), the proxy **never forwards
+   the request** to the real server. It synthesises a JSON-RPC error
+   response back to the client instead, and logs the verdict and reason.
+4. Scores that fall between the near-miss floor (default `0.15`) and the
+   match threshold are logged to a `near_misses` table rather than silently
+   dropped, so the threshold can be tuned by inspecting what almost matched
+   and didn't.
 
 ### Why the proxy doesn't use the `mcp` SDK at runtime
 
@@ -155,6 +205,19 @@ runs a benign scripted task against each, and writes everything to
 ```bash
 mcp-firewall report --audit-db audit.db
 ```
+
+To see the firewall actually stop something, run the attack scenario with
+and without a policy loaded:
+
+```bash
+mcp-firewall demo --scenario attack                       # firewall off: canary leaks
+mcp-firewall demo --scenario attack --policy policy.yaml  # firewall on: blocked
+```
+
+The `--policy` flag is what turns the firewall "on" for any `run` or `demo`
+invocation; omitting it runs in Phase 1's pure pass-through mode (still
+logged, never denied) — that's the baseline the benchmark harness (Phase 4)
+will compare against.
 
 ## Testing
 
