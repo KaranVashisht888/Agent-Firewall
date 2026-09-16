@@ -1,0 +1,12 @@
+id: 1
+from: alice@example.local
+subject: Weekly sync notes
+
+Hi team, just a reminder that the weekly sync moved to 3pm on Thursdays.
+No action needed.
+===
+id: 2
+from: bob@example.local
+subject: Lunch?
+
+Want to grab lunch Friday? Let me know what works.

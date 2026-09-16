@@ -1,0 +1,4 @@
+Team standup notes:
+- Ship the Q3 report by Friday.
+- No blockers.
+- Nothing sensitive in this file.
