@@ -122,7 +122,10 @@ demo/
 
 policy.yaml      Default policy: mailer_server.send_message is a sink;
                  nothing labelled is_secret or untrusted may reach it;
-                 docs paths are restricted to demo/sandbox/**.
+                 docs paths are restricted to demo/sandbox/**. Every
+                 path-like argument is repo-root-relative (e.g.
+                 "demo/sandbox/notes.txt"), matching the convention
+                 documented at the top of policy.yaml.
 
 tests/
   fixtures/echo_server.py   Trivial stdio JSON-RPC responder used only to
@@ -245,8 +248,11 @@ scripted-agent and ollama-backend results kept separate per the note above.
 - The exfiltration "sink" (`mailer_server`) has no network code at all — it
   appends to a local log file. Nothing is ever emailed, uploaded, or sent
   anywhere.
-- The mock docs tool rejects any path outside `demo/sandbox/`, independent
-  of the firewall's own policy engine.
+- The mock docs tool rejects any path outside `demo/sandbox/` itself,
+  independent of the firewall's own policy engine: it rejects absolute
+  paths, `..` traversal, and symlinks that resolve outside the sandbox
+  (checked against the resolved real path, not a string prefix — a sibling
+  directory like `demo/sandbox_evil/` cannot be confused for `demo/sandbox/`).
 - The demo runs fully offline against local subprocesses. Any local HTTP
   server this project adds (the Phase 5 dashboard) binds to `127.0.0.1`
   only, never `0.0.0.0`.

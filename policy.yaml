@@ -1,5 +1,10 @@
 # mcp-firewall default policy.
 #
+# Path convention: every path-like argument (allow_paths globs, and any
+# tool argument checked against them, e.g. docs_server's read_doc "path")
+# is repo-root-relative, e.g. "demo/sandbox/notes.txt" -- keep this in sync
+# with the path convention documented in README.md.
+#
 # sinks: tool calls where tainted data must never be allowed to arrive.
 sinks:
   - server: mailer_server
