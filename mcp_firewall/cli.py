@@ -90,6 +90,13 @@ def _print_findings(audit_db: str) -> int:
     return 0
 
 
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(REPO_ROOT / "dashboard"))
+    import server as dashboard_server  # local import: fastapi/uvicorn only needed for this command
+
+    return dashboard_server.main(["--audit-db", args.audit_db, "--port", str(args.port)])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mcp-firewall")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -112,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--audit-db", default="audit.db")
     p_report.add_argument("--findings", action="store_true", help="print detector findings instead of the call log")
     p_report.set_defaults(func=_cmd_report)
+
+    p_dashboard = sub.add_parser("dashboard", help="serve a read-only HTML dashboard over the audit log (127.0.0.1 only)")
+    p_dashboard.add_argument("--audit-db", default="audit.db")
+    p_dashboard.add_argument("--port", type=int, default=8765)
+    p_dashboard.set_defaults(func=_cmd_dashboard)
 
     return parser
 

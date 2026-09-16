@@ -15,18 +15,18 @@ information-flow control, not an LLM judge.**
 
 ## Status
 
-Phases 1–4 of 5 are complete: a method-agnostic stdio proxy shim with an
+All 5 phases are complete: a method-agnostic stdio proxy shim with an
 append-only audit log; label propagation, taint matching, and a policy
 engine wired into a real DENY path; static detectors over tool metadata
-(rug pull, tool shadowing, invisible characters, tool poisoning); and a
-21-scenario benchmark harness with results committed below. The dashboard
-lands in Phase 5 (tracked below).
+(rug pull, tool shadowing, invisible characters, tool poisoning); a
+21-scenario benchmark harness with results committed below; and a
+read-only dashboard over the audit log.
 
 - [x] Phase 1 — proxy shim, audit log, CLI
 - [x] Phase 2 — labels, taint matching, policy engine, DENY path
 - [x] Phase 3 — static detectors (rug pull, shadowing, invisible chars, tool poisoning)
 - [x] Phase 4 — benchmark harness and results
-- [ ] Phase 5 — read-only dashboard
+- [x] Phase 5 — read-only dashboard
 
 ## Threat model, in plain language
 
@@ -116,7 +116,7 @@ mcp_firewall/
                  LabelStore, and DetectorStore, since several proxy
                  processes open connections to the same audit-db file at
                  roughly the same moment on startup.
-  cli.py         `mcp-firewall run|demo|report [--findings]`
+  cli.py         `mcp-firewall run|demo|report [--findings]|dashboard`
 
 demo/
   servers/       Three small mock MCP servers, all local, all inert:
@@ -166,6 +166,16 @@ bench/
                     see "Benchmark results" below.
   run_bench.py     Runs every scenario firewall-off then firewall-on in an
                     isolated temp audit db, and writes bench/results.md.
+
+dashboard/
+  server.py        Read-only FastAPI app: /api/calls and /api/findings
+                    read the audit db (opened in SQLite's own explicit
+                    read-only mode -- this process never writes to it),
+                    serves static/index.html at /. Binds to 127.0.0.1 only
+                    -- hardcoded, no flag can change it.
+  static/index.html  Plain HTML/CSS/JS timeline view, no build step, no
+                    npm, no external requests -- everything is inline in
+                    this one file.
 ```
 
 ### How taint propagation and the DENY path work
@@ -355,6 +365,21 @@ having the agent forward the untrusted email's own text externally.
 
 See `bench/results.md` for the full per-scenario breakdown.
 
+## Running the dashboard
+
+```bash
+mcp-firewall demo --scenario attack --policy policy.yaml   # produce some audit.db data first
+mcp-firewall dashboard --audit-db audit.db                 # serves http://127.0.0.1:8765
+```
+
+Open the printed URL in a browser: a call timeline (server, direction,
+tool, ALLOW/DENY/PASSTHROUGH verdict, reason) filterable by server and
+verdict, and a detector findings table (category, severity, whether it was
+enforced, score, message). It's read-only in both directions -- the page
+only ever issues `GET` requests, and the server only ever reads the audit
+db. `--port` picks a different port; there is no `--host` flag, so it can
+only ever bind to `127.0.0.1`.
+
 ## Safety & scope
 
 - All attack fixtures are inert plain-text strings in `demo/fixtures/` —
@@ -370,8 +395,9 @@ See `bench/results.md` for the full per-scenario breakdown.
   paths, `..` traversal, and symlinks that resolve outside the sandbox
   (checked against the resolved real path, not a string prefix — a sibling
   directory like `demo/sandbox_evil/` cannot be confused for `demo/sandbox/`).
-- The demo runs fully offline against local subprocesses. Any local HTTP
-  server this project adds (the Phase 5 dashboard) binds to `127.0.0.1`
-  only, never `0.0.0.0`.
+- The demo runs fully offline against local subprocesses. The dashboard's
+  HTTP server binds to `127.0.0.1` only -- hardcoded in `dashboard/server.py`,
+  with no flag that can change it -- and only ever reads the audit db,
+  opened in SQLite's own read-only mode.
 - Nothing in this repo touches your real MCP client configuration, shell
   config, SSH config, or anything outside this repository.
