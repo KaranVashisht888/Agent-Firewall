@@ -1,0 +1,5 @@
+Changelog:
+v0.3 - Fixed a typo in the onboarding doc.
+v0.2 - Added the FAQ page.
+v0.1 - Initial internal notes published.
+Nothing sensitive in this file.

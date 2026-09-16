@@ -1,0 +1,6 @@
+Internal FAQ:
+Q: Where do I file expense reports?
+A: Use the finance portal, category "general".
+Q: Who do I ask about VPN issues?
+A: #it-helpdesk on chat.
+Nothing sensitive in this file.
