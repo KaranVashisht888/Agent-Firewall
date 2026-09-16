@@ -15,14 +15,15 @@ information-flow control, not an LLM judge.**
 
 ## Status
 
-Phases 1–2 of 5 are complete: a method-agnostic stdio proxy shim with an
-append-only audit log, plus label propagation, taint matching, and a policy
-engine wired into a real DENY path. Static detectors, the benchmark harness,
-and the dashboard land in later phases (tracked below).
+Phases 1–3 of 5 are complete: a method-agnostic stdio proxy shim with an
+append-only audit log; label propagation, taint matching, and a policy
+engine wired into a real DENY path; and static detectors over tool metadata
+(rug pull, tool shadowing, invisible characters, tool poisoning). The
+benchmark harness and the dashboard land in later phases (tracked below).
 
 - [x] Phase 1 — proxy shim, audit log, CLI
 - [x] Phase 2 — labels, taint matching, policy engine, DENY path
-- [ ] Phase 3 — static detectors (rug pull, shadowing, tool poisoning)
+- [x] Phase 3 — static detectors (rug pull, shadowing, invisible chars, tool poisoning)
 - [ ] Phase 4 — benchmark harness and results
 - [ ] Phase 5 — read-only dashboard
 
@@ -98,12 +99,23 @@ mcp_firewall/
                  hex/URL-decoded variants of the candidate text so an
                  encoded derivation still matches.
   policy.py      Loads policy.yaml (sinks, deny rules, allow_paths, matching
-                 threshold), evaluates ALLOW/DENY for a tools/call against
-                 whatever labels LabelStore.find_matches() turns up.
-  detectors.py   [phase 3] Static checks on tool metadata.
+                 threshold, detector warn_threshold), evaluates ALLOW/DENY
+                 for a tools/call against whatever labels
+                 LabelStore.find_matches() turns up.
+  detectors.py   Static checks on tool metadata from tools/list: schema-pin
+                 hashing (rug pull), cross-server name collisions
+                 (shadowing), invisible/control Unicode characters, and a
+                 heuristic imperative-instruction score (tool poisoning).
+                 DetectorStore persists a shared tool registry and findings
+                 log, same sharing model as LabelStore. See "Static
+                 detectors" below for the deny-capable vs. warn-only split.
   audit.py       SQLite append-only log of every tools/call and tools/list:
                  args, result, verdict, reason.
-  cli.py         `mcp-firewall run|demo|report`
+  _dbutil.py     Shared SQLite connect-with-retry helper used by AuditLog,
+                 LabelStore, and DetectorStore, since several proxy
+                 processes open connections to the same audit-db file at
+                 roughly the same moment on startup.
+  cli.py         `mcp-firewall run|demo|report [--findings]`
 
 demo/
   servers/       Three small mock MCP servers, all local, all inert:
@@ -122,18 +134,29 @@ demo/
 
 policy.yaml      Default policy: mailer_server.send_message is a sink;
                  nothing labelled is_secret or untrusted may reach it;
-                 docs paths are restricted to demo/sandbox/**. Every
-                 path-like argument is repo-root-relative (e.g.
+                 docs paths are restricted to demo/sandbox/**; rug_pull,
+                 tool_shadowing, and invisible_chars are all enabled by
+                 default (tool_poisoning has no deny rule -- see below).
+                 Every path-like argument is repo-root-relative (e.g.
                  "demo/sandbox/notes.txt"), matching the convention
                  documented at the top of policy.yaml.
 
 tests/
-  fixtures/echo_server.py   Trivial stdio JSON-RPC responder used only to
-                             test that the proxy forwards arbitrary methods.
-  fixtures/sdk_server.py    A real server built with the official `mcp` SDK
-                             (dev/test-only dependency), used to prove the
-                             proxy also works against genuine SDK traffic,
-                             not just our own hand-rolled mock protocol.
+  fixtures/echo_server.py          Trivial stdio JSON-RPC responder used
+                                    only to test that the proxy forwards
+                                    arbitrary methods.
+  fixtures/sdk_server.py           A real server built with the official
+                                    `mcp` SDK (dev/test-only dependency),
+                                    used to prove the proxy also works
+                                    against genuine SDK traffic, not just
+                                    our own hand-rolled mock protocol.
+  fixtures/configurable_server.py  A stdio mock server whose tools/list
+                                    content is driven by an env var, used
+                                    to drive the detector integration tests
+                                    (two "servers" colliding on a tool
+                                    name, a schema changing between two
+                                    tools/list calls) without needing the
+                                    full demo servers.
 ```
 
 ### How taint propagation and the DENY path work
@@ -162,6 +185,36 @@ tests/
    dropped, so the threshold can be tuned by inspecting what almost matched
    and didn't.
 
+### Static detectors: deny-capable vs. warn-only
+
+`detectors.py` runs a second, independent set of checks against every
+`tools/list` response -- not about data flow, but about the tool
+definitions themselves. These are deliberately split into two confidence
+tiers rather than one on/off switch:
+
+| Category | Confidence | Deny rule | Effect when triggered |
+| --- | --- | --- | --- |
+| `rug_pull` | deterministic | `deny: rug_pull` (default **on**) | A tool's schema hash changed since it was first pinned. |
+| `tool_shadowing` | deterministic | `deny: tool_shadowing` (default **on**) | Two servers registered the same tool name. |
+| `invisible_chars` | deterministic | `deny: invisible_chars` (default **on**) | A tool description contains zero-width, bidi-override, or raw control characters. |
+| `tool_poisoning` | heuristic | *(none -- cannot deny)* | A description matches imperative-instruction patterns (e.g. "ignore previous instructions", "do not tell the user"), scored 0–1 and compared against `detectors.warn_threshold` (default `0.5`). |
+
+The first three are near-zero-false-positive by construction (a hash either
+matches or it doesn't; a name either collides or it doesn't), so each has
+its own opt-in `deny:` rule in `policy.yaml` and all three ship enabled.
+When active, a flagged tool is **filtered out of the `tools/list` result**
+the client sees -- the one deliberate exception to the proxy's
+always-verbatim forwarding, scoped to just `result.tools` -- and the
+flagged state persists per `(server, tool)`, so a `tools/call` to that tool
+is refused even if a client never re-lists.
+
+`tool_poisoning` is different: ordinary tool documentation is often
+imperative too ("Call this before fetching user data"), so treating it as
+deny-capable would over-block. It can never deny a call, no matter how high
+its score or how `policy.yaml` is configured -- it only ever logs a finding
+(server, tool, matched phrases, score). Findings from all four categories,
+enforced or not, are queryable with `mcp-firewall report --findings`.
+
 ### Why the proxy doesn't use the `mcp` SDK at runtime
 
 The proxy operates purely at the JSON-RPC framing level: it never needs to
@@ -176,12 +229,13 @@ traffic and not just our own mock protocol.
 ### A note on the scripted demo agent
 
 `demo/agent.py`, run with the default `--backend scripted`, is a
-deterministic, **worst-case compliant** agent: starting from the phase that
-adds attack scenarios, it will follow any imperative instruction it finds
-in tool output, including text from the untrusted `inbox_server`, with no
-judgement of its own. That's intentional — it exists to show the firewall
-stops the bad outcome even when the layer above it does exactly what an
-attacker's text tells it to.
+deterministic, **worst-case compliant** agent: in the attack scenario
+(`--scenario attack`), it follows the instruction embedded in the untrusted
+`inbox_server`'s email fixture literally and mechanically — read the
+sandboxed secrets file, then forward its contents to whatever address the
+untrusted email named — with no judgement of its own. That's intentional —
+it exists to show the firewall stops the bad outcome even when the layer
+above it does exactly what an attacker's text tells it to.
 
 **Firewall-off "attack success" measured with the scripted agent is true by
 construction**, not an empirical claim about how a real model behaves — it
@@ -221,6 +275,14 @@ The `--policy` flag is what turns the firewall "on" for any `run` or `demo`
 invocation; omitting it runs in Phase 1's pure pass-through mode (still
 logged, never denied) — that's the baseline the benchmark harness (Phase 4)
 will compare against.
+
+Detector findings (rug pull, shadowing, invisible characters, tool
+poisoning) are logged separately from the call audit log; inspect them
+with:
+
+```bash
+mcp-firewall report --findings --audit-db audit.db
+```
 
 ## Testing
 
